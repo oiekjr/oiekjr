@@ -4,10 +4,10 @@
 
 ## 利用言語
 
+- 日本語
 - HTML / CSS
 - JavaScript / TypeScript
 - PHP
 - Node.js
 - Python
 - SQL
-- 日本語
