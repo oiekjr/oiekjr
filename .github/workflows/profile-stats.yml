@@ -1,0 +1,46 @@
+name: Update profile stats
+
+on:
+  schedule:
+    # Run daily at 09:23 JST (UTC+9).
+    - cron: '23 0 * * *'
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/profile-stats.yml'
+      - 'scripts/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: profile-stats
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: master
+      - name: Test stats collection and SVG rendering
+        run: python3 -m unittest discover -s tests -v
+      - name: Generate profile SVGs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROFILE_USERNAME: ${{ github.repository_owner }}
+        run: python3 scripts/update_stats.py --username "$PROFILE_USERNAME"
+      - name: Save updated profile SVGs
+        run: |
+          git add assets/profile.svg assets/profile-dark.svg assets/profile-mobile.svg assets/profile-dark-mobile.svg
+          if git diff --cached --quiet; then
+            echo "Profile SVGs are unchanged."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'chore(profile): update GitHub activity stats'
+          git push origin HEAD:master
