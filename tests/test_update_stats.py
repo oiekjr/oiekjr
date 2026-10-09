@@ -225,7 +225,7 @@ class StatsTests(unittest.TestCase):
         markup = render_count(1_000_000_000_000)
 
         root = ET.fromstring(f"<svg>{markup}</svg>")
-        self.assertLessEqual(len(root.findall('.//text[@class="count-frame"]')), 32)
+        self.assertLessEqual(len(root.findall('.//text[@class="count-frame"]')), 24)
         self.assertLess(len(markup), 10_000)
 
     def test_count_up_keeps_the_final_value_without_animation(self) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,7 +18,7 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_RESPONSE_BYTES = 2_000_000
-COUNT_STEPS = 32
+COUNT_STEPS = 24
 COUNT_DURATION_MS = 1800
 COUNT_INITIAL_HOLD_MS = 180
 QUERY = """
@@ -235,7 +236,7 @@ def render_profile(
     count_width = max(len("—" if value is None else f"{value:,}") for value in counts)
     cell_width = 180 if compact else 210
 
-    return template.substitute(
+    svg = template.substitute(
         colors,
         username=escape(username),
         year=stats.year,
@@ -274,6 +275,8 @@ def render_profile(
         pull_requests="—" if stats.pull_requests is None else f"{stats.pull_requests:,}",
         issues="—" if stats.issues is None else f"{stats.issues:,}",
     )
+    # Remove indentation between elements while preserving text and CSS.
+    return re.sub(r">\s+<", "><", svg).strip() + "\n"
 
 
 def render_count(value: int | None) -> str:
