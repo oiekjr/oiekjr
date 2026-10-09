@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="$width" height="$height" viewBox="0 0 $width $height" role="img" aria-labelledby="title desc">
   <title id="title">$username — GitHub profile</title>
-  <desc id="desc">Languages and technologies: Japanese, HTML, CSS, JavaScript, TypeScript, PHP, Node.js, Python and SQL. AI tools: Codex and Claude Code. Public activity in $year — Repositories with commit contributions: $contributed_repositories. Commits: $commits. Pull requests: $pull_requests. Issues: $issues. $updated.</desc>
+  <desc id="desc">Languages and technologies: Japanese, HTML, CSS, JavaScript, TypeScript, PHP, Node.js, Python and SQL. AI tools: Codex and Claude Code. GitHub activity in $year — Repositories with commit contributions: $contributed_repositories. Commits: $commits. Pull requests: $pull_requests. Issues: $issues. $updated.</desc>
 
   <style>
     .count-static { display: none; }

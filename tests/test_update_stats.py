@@ -1,4 +1,4 @@
-"""Test public activity collection, SVG rendering, and update failures."""
+"""Test complete activity collection, SVG rendering, and update failures."""
 
 from __future__ import annotations
 
@@ -11,13 +11,13 @@ from string import Template
 from unittest.mock import Mock, patch
 
 from scripts import update_stats
-from scripts.update_stats import Stats, fetch_stats, render_count, render_profile, request_graphql, validate_count
+from scripts.update_stats import IncompleteStatsError, Stats, fetch_stats, render_count, render_profile, request_graphql, validate_count
 
 NOW = datetime(2026, 10, 9, 7, 30, tzinfo=timezone.utc)
 
 
 def response(contributed_repositories: int = 12) -> dict[str, object]:
-    """Build a GraphQL response fixture for public activity.
+    """Build a GraphQL response fixture for complete activity.
 
     Args:
         contributed_repositories: Number of repositories with commit contributions.
@@ -26,12 +26,13 @@ def response(contributed_repositories: int = 12) -> dict[str, object]:
         A response with the same structure as the GraphQL API.
     """
     return {
-        "data": {"user": {
+        "data": {"viewer": {"login": "oiekjr"}, "user": {
             "contributionsCollection": {
                 "totalRepositoriesWithContributedCommits": contributed_repositories,
                 "totalCommitContributions": 1234,
                 "totalPullRequestContributions": 56,
                 "totalIssueContributions": 7,
+                "restrictedContributionsCount": 0,
             },
         }},
     }
@@ -84,10 +85,36 @@ class StatsTests(unittest.TestCase):
 
     def test_missing_user_fails(self) -> None:
         """Reject a missing user rather than displaying zero activity."""
-        request = Mock(return_value={"data": {"user": None}})
+        request = Mock(return_value={"data": {"viewer": {"login": "missing"}, "user": None}})
 
         with self.assertRaises(ValueError):
             fetch_stats("missing", NOW, request)
+
+    def test_inaccessible_contributions_are_rejected(self) -> None:
+        """Reject successful API responses that omit private activity from typed counts."""
+        payload = response()
+        payload["data"]["user"]["contributionsCollection"]["restrictedContributionsCount"] = 5269
+        request = Mock(return_value=payload)
+
+        with self.assertRaises(IncompleteStatsError):
+            fetch_stats("oiekjr", NOW, request)
+
+    def test_token_must_belong_to_profile_owner(self) -> None:
+        """Reject another user's credentials even when the API returns valid public counts."""
+        payload = response()
+        payload["data"]["viewer"]["login"] = "github-actions[bot]"
+        request = Mock(return_value=payload)
+
+        with self.assertRaises(IncompleteStatsError):
+            fetch_stats("oiekjr", NOW, request)
+
+    def test_profile_owner_login_is_case_insensitive(self) -> None:
+        """Accept the profile owner's login regardless of letter case."""
+        request = Mock(return_value=response())
+
+        stats = fetch_stats("OIEKJR", NOW, request)
+
+        self.assertEqual(stats, Stats(2026, 12, 1234, 56, 7))
 
     def test_counts_are_nonnegative_integers(self) -> None:
         """Validate counts around zero and reject invalid types."""
@@ -109,7 +136,7 @@ class StatsTests(unittest.TestCase):
 
                     text = " ".join(root.itertext())
                     self.assertIn("1,234", text)
-                    self.assertIn("Public activity in 2026 — Repositories with commit contributions: 12. Commits: 1,234. Pull requests: 56. Issues: 7.", text)
+                    self.assertIn("GitHub activity in 2026 — Repositories with commit contributions: 12. Commits: 1,234. Pull requests: 56. Issues: 7.", text)
                     self.assertIn("Updated 2026-10-09 UTC", text)
 
     def test_successful_update_saves_every_display_variant(self) -> None:
@@ -142,7 +169,7 @@ class StatsTests(unittest.TestCase):
 
         text = " ".join(root.itertext())
         self.assertIn("Awaiting first update", text)
-        self.assertIn("Public activity in 2026 — Repositories with commit contributions: —. Commits: —.", text)
+        self.assertIn("GitHub activity in 2026 — Repositories with commit contributions: —. Commits: —.", text)
 
     def test_stars_are_not_displayed(self) -> None:
         """Exclude star counts from both themes."""
@@ -238,6 +265,36 @@ class StatsTests(unittest.TestCase):
             for name in image_names:
                 self.assertEqual((root / "assets" / name).read_text(), "previous image")
 
+    def test_incomplete_activity_preserves_previous_images(self) -> None:
+        """Keep every existing image when credentials cannot read private activity."""
+        payload = response()
+        payload["data"]["user"]["contributionsCollection"]["restrictedContributionsCount"] = 5269
+        image_names = ("profile.svg", "profile-dark.svg", "profile-mobile.svg", "profile-dark-mobile.svg")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "assets").mkdir()
+            for name in image_names:
+                (root / "assets" / name).write_text("previous image")
+
+            with patch.object(update_stats, "ROOT", root), patch.dict("os.environ", {"GH_TOKEN": "test"}), \
+                    patch("sys.argv", ["update_stats.py", "--username", "oiekjr"]), \
+                    patch.object(update_stats, "request_graphql", return_value=payload):
+                result = update_stats.main()
+
+            self.assertEqual(result, 1)
+            for name in image_names:
+                self.assertEqual((root / "assets" / name).read_text(), "previous image")
+
+    def test_missing_token_cannot_fall_back_to_public_counts(self) -> None:
+        """Reject missing credentials before fetching or replacing images."""
+        with patch.dict("os.environ", {}, clear=True), \
+                patch("sys.argv", ["update_stats.py", "--username", "oiekjr"]), \
+                patch.object(update_stats, "request_graphql") as request:
+            result = update_stats.main()
+
+        self.assertEqual(result, 1)
+        request.assert_not_called()
+
     def test_response_size_is_bounded(self) -> None:
         """Validate responses immediately below, at, and above the size limit."""
         for size in [31, 32, 33]:
@@ -246,6 +303,7 @@ class StatsTests(unittest.TestCase):
                 transport = Mock()
                 transport.__enter__ = Mock(return_value=transport)
                 transport.__exit__ = Mock(return_value=False)
+                transport.headers = {"X-OAuth-Scopes": "read:user"}
                 transport.read.return_value = body
 
                 with patch.object(update_stats, "MAX_RESPONSE_BYTES", 32), \
@@ -255,6 +313,36 @@ class StatsTests(unittest.TestCase):
                             request_graphql("test", {})
                     else:
                         self.assertEqual(request_graphql("test", {}), {"data": {}})
+
+    def test_token_requires_profile_read_scope(self) -> None:
+        """Reject insufficient scopes even when hidden contribution counts are not shared."""
+        for scope_header in ("", "repo, read:org", "user:email"):
+            with self.subTest(scopes=scope_header):
+                transport = Mock()
+                transport.__enter__ = Mock(return_value=transport)
+                transport.__exit__ = Mock(return_value=False)
+                transport.headers = {"X-OAuth-Scopes": scope_header}
+
+                with patch.object(update_stats, "urlopen", return_value=transport), \
+                        self.assertRaises(IncompleteStatsError):
+                    request_graphql("test", {})
+
+                transport.read.assert_not_called()
+
+    def test_profile_read_scope_accepts_parent_user_scope(self) -> None:
+        """Accept explicit profile access and the broader parent user scope."""
+        for scope_header in ("read:user", "repo, read:user", "user"):
+            with self.subTest(scopes=scope_header):
+                transport = Mock()
+                transport.__enter__ = Mock(return_value=transport)
+                transport.__exit__ = Mock(return_value=False)
+                transport.headers = {"X-OAuth-Scopes": scope_header}
+                transport.read.return_value = b'{"data":{}}'
+
+                with patch.object(update_stats, "urlopen", return_value=transport):
+                    payload = request_graphql("test", {})
+
+                self.assertEqual(payload, {"data": {}})
 
 
 if __name__ == "__main__":

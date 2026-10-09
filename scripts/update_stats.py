@@ -1,4 +1,4 @@
-"""Fetch public GitHub activity and generate profile SVGs."""
+"""Fetch GitHub activity, including private contributions, and generate profile SVGs."""
 
 from __future__ import annotations
 
@@ -22,12 +22,16 @@ COUNT_DURATION_MS = 1800
 COUNT_INITIAL_HOLD_MS = 180
 QUERY = """
 query Profile($login: String!, $from: DateTime!, $to: DateTime!) {
+  viewer {
+    login
+  }
   user(login: $login) {
     contributionsCollection(from: $from, to: $to) {
       totalRepositoriesWithContributedCommits
       totalCommitContributions
       totalPullRequestContributions
       totalIssueContributions
+      restrictedContributionsCount
     }
   }
 }
@@ -48,13 +52,17 @@ THEMES = {
 
 @dataclass(frozen=True)
 class Stats:
-    """Store public activity counts and their calendar year."""
+    """Store activity counts and their calendar year."""
 
     year: int
     contributed_repositories: int | None = None
     commits: int | None = None
     pull_requests: int | None = None
     issues: int | None = None
+
+
+class IncompleteStatsError(ValueError):
+    """Reject credentials or visibility that would publish incomplete activity."""
 
 
 def main() -> int:
@@ -76,7 +84,7 @@ def main() -> int:
         else:
             token = os.environ.get("GH_TOKEN")
             if not token:
-                raise ValueError("GH_TOKEN is required")
+                raise IncompleteStatsError("Set PROFILE_STATS_TOKEN to a profile-owner token with read:user access.")
             stats = fetch_stats(args.username, now, lambda variables: request_graphql(token, variables))
             updated = f"Updated {now:%Y-%m-%d} UTC"
 
@@ -91,6 +99,9 @@ def main() -> int:
         (ROOT / "assets").mkdir(exist_ok=True)
         for name, svg in images.items():
             (ROOT / "assets" / name).write_text(svg, encoding="utf-8")
+    except IncompleteStatsError as error:
+        print(f"Profile update failed: {error}", file=sys.stderr)
+        return 1
     except (ValueError, KeyError, TypeError, OSError) as error:
         print(f"Profile update failed: {type(error).__name__}", file=sys.stderr)
         return 1
@@ -100,7 +111,7 @@ def main() -> int:
 
 
 def fetch_stats(username: str, now: datetime, request: Callable[[dict[str, object]], dict[str, object]]) -> Stats:
-    """Fetch public activity and repositories with commit contributions this year.
+    """Fetch complete activity and repositories with commit contributions this year.
 
     Args:
         username: GitHub login to query.
@@ -112,6 +123,7 @@ def fetch_stats(username: str, now: datetime, request: Callable[[dict[str, objec
 
     Raises:
         ValueError: The API reports an error, the user is missing, or a count is invalid.
+        IncompleteStatsError: The token belongs to another user or some contributions are inaccessible.
     """
     variables: dict[str, object] = {
         "login": username,
@@ -122,10 +134,19 @@ def fetch_stats(username: str, now: datetime, request: Callable[[dict[str, objec
     if payload.get("errors"):
         raise ValueError("GitHub API returned errors")
     data = cast(dict[str, object], payload["data"])
+    viewer = cast(dict[str, object], data["viewer"])
+    login = viewer["login"]
+    if not isinstance(login, str) or login.casefold() != username.casefold():
+        raise IncompleteStatsError("PROFILE_STATS_TOKEN must authenticate as the profile owner.")
     user = cast(dict[str, object], data["user"])
     if not user:
         raise ValueError("GitHub user not found")
     contributions = cast(dict[str, object], user["contributionsCollection"])
+    # A successful API response can still omit private activity from the typed counts.
+    if validate_count(contributions["restrictedContributionsCount"]) > 0:
+        raise IncompleteStatsError(
+            "Some contributions are inaccessible. Check the token's read:user scope and repository access."
+        )
 
     return Stats(
         year=now.year,
@@ -148,6 +169,7 @@ def request_graphql(token: str, variables: dict[str, object]) -> dict[str, objec
 
     Raises:
         ValueError: The response exceeds the size limit or is not a JSON object.
+        IncompleteStatsError: The token does not provide the required profile scope.
         URLError: The request fails.
     """
     request = Request(
@@ -157,6 +179,11 @@ def request_graphql(token: str, variables: dict[str, object]) -> dict[str, objec
         method="POST",
     )
     with urlopen(request, timeout=20) as response:
+        # Hidden private contribution counts can also be zero without the required scope.
+        scope_header = response.headers.get("X-OAuth-Scopes", "")
+        scopes = {scope.strip() for scope in scope_header.split(",")}
+        if not scopes.intersection({"read:user", "user"}):
+            raise IncompleteStatsError("Use a profile-owner classic personal access token with read:user scope.")
         raw = response.read(MAX_RESPONSE_BYTES + 1)
     if len(raw) > MAX_RESPONSE_BYTES:
         raise ValueError("API response exceeds the size limit")
